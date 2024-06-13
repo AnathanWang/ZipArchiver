@@ -1,5 +1,5 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QVBoxLayout, QFileDialog, QMessageBox, QComboBox, QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QVBoxLayout, QFileDialog, QMessageBox, QComboBox, QHBoxLayout, QListWidget, QDialog, QDialogButtonBox
 from PyQt5.QtGui import QFont
 import zipfile
 import os
@@ -8,6 +8,29 @@ from rarfile import RarFile
 import tarfile
 from tempfile import NamedTemporaryFile
 import shutil
+
+
+class FileSelectionDialog(QDialog):
+    def __init__(self, file_list):
+        super().__init__()
+        self.setWindowTitle("Выберите файлы для удаления")
+        self.file_list_widget = QListWidget(self)
+        self.file_list_widget.addItems(file_list)
+        self.file_list_widget.setSelectionMode(QListWidget.MultiSelection)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.file_list_widget)
+        layout.addWidget(self.button_box)
+
+        self.setLayout(layout)
+
+    def get_selected_files(self):
+        selected_items = self.file_list_widget.selectedItems()
+        return [item.text() for item in selected_items]
 
 
 class ArchiverApp(QWidget):
@@ -95,7 +118,7 @@ class ArchiverApp(QWidget):
     def select_file(self):
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
-        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл", options=options)
+        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл или папку", options=options)
 
         if not file_path:
             file_path = QFileDialog.getExistingDirectory(self, "Выберите папку", options=options)
@@ -183,8 +206,7 @@ class ArchiverApp(QWidget):
                     for root, _, files in os.walk(path):
                         for file in files:
                             file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, os.path.join(path, '..'))
-                            zipf.write(file_path, arcname=arcname)
+                            zipf.write(file_path, arcname=os.path.relpath(file_path, path))
                 self.show_success_message("архивации", archive_path)
             elif archive_format == "7Z":
                 archive_path = os.path.join(directory, f"{foldername}.7z")
@@ -195,10 +217,7 @@ class ArchiverApp(QWidget):
                     if choice == QMessageBox.No:
                         return
                 with SevenZipFile(archive_path, 'w') as szf:
-                    for root, _, files in os.walk(path):
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            szf.write(file_path, arcname=os.path.relpath(file_path, os.path.join(path, '..')))
+                    szf.writeall(path, foldername)
                 self.show_success_message("архивации", archive_path)
             elif archive_format == "TAR":
                 archive_path = os.path.join(directory, f"{foldername}.tar")
@@ -212,24 +231,65 @@ class ArchiverApp(QWidget):
                     tar.add(path, arcname=foldername)
                 self.show_success_message("архивации", archive_path)
 
-    def show_success_message(self, operation, archive_path):
-        QMessageBox.information(self, "Успешно", f"Операция {operation} выполнена успешно! Архив: {archive_path}")
+    def archive_selected_file(self):
+        file_path = self.file_entry.text()
+        archive_format = self.format_combo.currentText()
+        self.archive_file(file_path, archive_format)
+
+    def unarchive_selected_file(self):
+        archive_path = self.archive_entry.text()
+        destination_path = self.unarchive_destination_path  # Используем выбранную директорию для разархивации
+        self.unarchive_file(archive_path, destination_path)
 
     def unarchive_file(self, archive_path, destination_path):
-        if os.path.isfile(archive_path):
+        if not os.path.exists(archive_path):
+            QMessageBox.warning(self, "Ошибка", "Указанный архив не существует.")
+            return
+
+        try:
             if archive_path.endswith(".zip"):
                 with zipfile.ZipFile(archive_path, 'r') as zipf:
                     zipf.extractall(destination_path)
             elif archive_path.endswith(".7z"):
                 with SevenZipFile(archive_path, 'r') as szf:
                     szf.extractall(destination_path)
-            elif archive_path.endswith(".rar"):
-                with RarFile(archive_path, 'r') as rar:
-                    rar.extractall(destination_path)
             elif archive_path.endswith(".tar"):
                 with tarfile.open(archive_path, 'r') as tar:
                     tar.extractall(destination_path)
-            self.show_success_message("разархивации", archive_path)
+            elif archive_path.endswith(".rar"):
+                with RarFile(archive_path, 'r') as rar:
+                    rar.extractall(destination_path)
+
+            self.show_success_message("разархивации", destination_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Произошла ошибка при разархивации: {e}")
+
+    def show_success_message(self, operation, path):
+        QMessageBox.information(self, "Успех", f"Операция {operation} завершена успешно: {path}")
+
+    def add_files_to_archive(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Выберите файлы для добавления")
+        if files:
+            archive_path = self.edit_entry.text()
+            self.edit_archive(archive_path, "add", files)
+
+    def remove_files_from_archive(self):
+        archive_path = self.edit_entry.text()
+        if archive_path and os.path.exists(archive_path):
+            if archive_path.endswith(".zip"):
+                with zipfile.ZipFile(archive_path, 'r') as zipf:
+                    file_list = zipf.namelist()
+            elif archive_path.endswith(".7z"):
+                with SevenZipFile(archive_path, 'r') as szf:
+                    file_list = szf.getnames()
+            elif archive_path.endswith(".tar"):
+                with tarfile.open(archive_path, 'r') as tar:
+                    file_list = tar.getnames()
+
+            dialog = FileSelectionDialog(file_list)
+            if dialog.exec_() == QDialog.Accepted:
+                selected_files = dialog.get_selected_files()
+                self.edit_archive(archive_path, "remove", selected_files)
 
     def edit_archive(self, archive_path, operation, files=[]):
         if os.path.isfile(archive_path):
@@ -280,35 +340,12 @@ class ArchiverApp(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Произошла ошибка при редактировании архива: {e}")
 
-    def archive_selected_file(self):
-        source_path = self.file_entry.text()
-        if os.path.exists(source_path) and hasattr(self, 'archive_destination_path'):
-            archive_format = self.format_combo.currentText()
-            self.archive_file(source_path, archive_format)
-
-    def unarchive_selected_file(self):
-        archive_path = self.archive_entry.text()
-        if os.path.exists(archive_path) and hasattr(self, 'unarchive_destination_path'):
-            self.unarchive_file(archive_path, self.unarchive_destination_path)
-
-    def add_files_to_archive(self):
-        archive_path = self.edit_entry.text()
-        files, _ = QFileDialog.getOpenFileNames(self, "Выберите файлы для добавления в архив")
-        if archive_path and files:
-            self.edit_archive(archive_path, "add", files)
-
-    def remove_files_from_archive(self):
-        archive_path = self.edit_entry.text()
-        files, _ = QFileDialog.getOpenFileNames(self, "Выберите файлы для удаления из архива")
-        if archive_path and files:
-            self.edit_archive(archive_path, "remove", files)
-
     def exit_program(self):
-        print("Выход из программы....")
-        sys.exit()
+        QApplication.quit()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    archiver_app = ArchiverApp()
-    archiver_app.show()
+    window = ArchiverApp()
+    window.show()
     sys.exit(app.exec_())
